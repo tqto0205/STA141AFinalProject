@@ -1,0 +1,500 @@
+---
+title: "Final Project"
+author: "Trang To"
+date: "2025-03-16"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(kernlab)
+library(caret)
+library(glmnet)
+library(MASS)
+library(ROCR)
+library(kknn)
+```
+
+## Neural Activity and Decision-Making in Mice: Analysis on Spike Train Data from Visual Cortex
+### Abstract
+Being able to predict behavioral outcomes from neural activity is a cruical part of neuroscience research as it has many applications in understanding how decisions are made. This report analyzes how spike train data from the visual corext of mice who are performing a decision-making task, where trials can result in a sucess (feedback = 1) or failure (feedback = -1). Using data from Steinmetz et al. (2019), 18 sessions with 4 mice were picked. We investigated the effectiveness of three classification models - Logistic Regression, Linear Discriminat Analysis (LDA), and k-Nearest Neighbors (kNN) - to predict the trials outcome based on neural activity and the stimulus' contrast levels.
+
+Feature analysis revealed that mean firing rate was the most significant predictor across models and contract levels having mixed effects - but important nonetheless. Principal Component Analysis (PCA) suggests there are subtle differences in neural firing across session and mice but no strong clustering. Furthermore, the results of the report indicated that kNN achieved the highest accuracy (73.5%), outperforming the other two classificatio model. However, all models struggle with class imbalance due to the data having more success than failures. 
+
+Although the models did achieve a reasonable accuracy rate, there were limitations in handling the imblanace of data and complext neural activity patterns. Further analysis would work on advanced models that can be able to handle more complex algorithms - rather than just linear which was used in this report. Addressing these challenges would enhance the report and better the understanding of decision-making.
+
+### I. Introduction
+Neural activity and behavioral outcomes is a critical part of neurosicence and has significant implications for research and clinical application. 
+
+In this project, we will focus on analyzing data collected in Steinmetz et al. (2019) in order to provide an analysis on decision-making tasts in mice. This analysis will focus on 18 sessions obtained from four mice (Cori, Forssman, Hence, and Lederberg). With each session consisting of hunders of traisl in which the visual stimuli had variying contrast levels are presented to them on a screen. The mice were be required to make a choice (left or right) and their decisions were classified as successes (feedback or 1) or failures (feedback of -1).
+
+The primary objective of this report is to develop a prdictive model that can accurately determine the outcome of each trial based on the neural activity data-represented by spike trains recorded in the visual corext- and the stimuli parameters (left or right contrasts). To achieve this, the project will employ the logistic regression and k-nearest neighbors (kNN) method. Both models will be compared which will help determine which strategy for predictive behavioral outcome the best.
+
+The project will answer two questions: which predictors are the most important to predicting the outcome of each trail and which binary classification method most accurately classifies which one.
+
+### II. Exploratory analysis
+In order to create a model, we must first understand the data we will be handling. The data provided has 18 sessions and 4 mice, and 6 variables that were measured: feedback_type, contrast_left, contrast_right, time, spks, brain_area. 
+
+```{r Data Import, echo=FALSE, warning=FALSE}
+setwd("/Users/kittyto/Desktop/STA141A/STA141AProject/sessions") # Getting the files
+
+session = list()
+for (i in 1:18) {
+  session[[i]] = readRDS(paste('session', i, '.rds', sep = ''))
+  #print(session[[i]]$mouse_name)
+  #print(session[[i]]$date_exp)
+}
+```
+##### II.1 Data structures across sessions
+Now that we are familiar with the semantics of the dataset, we will visualize it to better understand the trends already present in the data. In the table presented, we can see that each session is for a different mice and the number or traisl vary between 100 to 450 trials. It can also be seen that there is a lot of different types of neurons that were used and different numbers of neurons depending on the trial. 
+
+It is also important to know how the mice performed on the trials. It can be seen that the mice were successful 3608 times compared to their 1474 failures. This means that the mice were successful most of the time. Next, the cross-tabulation of left and right contrast levels gives further details about the stimulus conditions across sessions. It is important to note that some conditions occurred more than others, especially when there was no contrast in the left and right. 
+
+Additionally, the plot shows which parts of the brain were measured in each of the session. Some areas were measured more than others which is important to note as not all areas can be attributed to the data. This summary helps shed light on the data set that will be used for later modeling and analysis. 
+
+```{r Data structures across sessions, echo=FALSE, warning=FALSE}
+# Summary of the data
+session_info <- data.frame(
+  session_number = 1:18,
+  mouse_name = sapply(session, function(x) x$mouse_name),
+  date_exp = sapply(session, function(x) x$date_exp),
+  n_trials = sapply(session, function(x) length(x$feedback_type)),
+  n_neurons = sapply(session, function(x) nrow(x$spks[[1]])),
+  neuron_types = sapply(session, function(x) paste(unique(x$brain_area), collapse = ", "))
+)
+print(session_info)
+
+# Summary of contrast and feedback
+feedback_summary <- do.call(rbind, lapply(1:18, function(i) {
+  data.frame(
+    session = i,
+    feedback = session[[i]]$feedback_type,
+    contrast_left = session[[i]]$contrast_left,
+    contrast_right = session[[i]]$contrast_right
+  )
+}))
+print(table(feedback_summary$feedback))
+print(table(feedback_summary$contrast_left, feedback_summary$contrast_right))
+
+# Plot for brain areas used
+session_brain_areas <- do.call(rbind, lapply(seq_along(session), function(i) {
+  data.frame(
+    session_id = i,
+    brain_area = session[[i]]$brain_area
+  )
+}))
+
+area_counts <- session_brain_areas %>%
+  group_by(session_id, brain_area) %>%
+  summarize(count = n(), .groups = "drop")
+
+presence_df <- area_counts %>%
+  mutate(presence = count > 0)
+
+ggplot(data = filter(presence_df, presence),
+       aes(x = factor(session_id), y = brain_area)) +
+  geom_point() +
+  labs(
+    title = "Brain Area recorded in each session",
+    x = "Session number",
+    y = "Area of Brain"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 0),
+    panel.grid.major = element_line(color = "lightgrey"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+##### II.2. Neural activity examination
+Next, an analysis of neural activity was examed to better understand how the mean firing rate across trials in each session. The spike trains were accessed and their mean values were computed to represent the overall neural response during the trial. These visualizations show most of the neural firing rates were within 0.3 spiked per bin of each other. There is fluctuation that was pretty consistent across trials which could suggests there is a trial-to-trail variability; however, as they all stayed within a 0.3 difference between them, it could mean there is no long-term drift or sudden shift we should be worried about. 
+
+Additionally, there is not a very clear positive or negative trend in most of the graphs. This could suggests that there is no strong drift in the neural activity levels over time. This would mean that the animal performed consistently throughout the trials and mean that within the session, the conditions remained steady. 
+
+It is noted that each session had a different ranges in the average firing rate which could mean that the neural recording conditions and task parameters could have changed dramatically between sessions. Thus, this could affect data analysis; however, this could be expected as the sessions were not all conducted in the same day, which could lead to other variables affecting the data.
+
+```{r Neural Activity Examination, echo=FALSE, warning=FALSE}
+# Creating a plot for each session
+for (i in 1:length(session)) {
+  # Get the current session data
+  current_session <- session[[i]]
+  
+  # Aggregating trials (mean firing)
+  trial_means <- sapply(current_session$spks, function(mat) mean(mat))
+  
+  df_trials <- data.frame(trial = 1:length(trial_means), mean_firing = trial_means)
+  
+  # Plot
+  p <- ggplot(df_trials, aes(x = trial, y = mean_firing)) +
+    geom_line(color = "blue") +
+    geom_point() +
+    labs(title = paste("Aggregated Neural Activity per Trial (Session", i, ")"),
+         x = "Trial",
+         y = "Mean Firing Rate")
+  print(p)
+}
+```
+
+##### II.3. Trial-By-Trial Variability
+
+```{r Trial-By-Trial Variability, echo=FALSE, warning=FALSE}
+# Creating a plot to see changes between trials
+for (i in 1:length(session)) {
+  current_session <- session[[i]]
+  
+  # Getting trial mean
+  trial_means <- sapply(current_session$spks, function(mat) mean(mat))
+  
+  # Getting the difference
+  diff_trial <- c(NA, diff(trial_means))
+  df_diff <- data.frame(trial = 1:length(trial_means),diff = diff_trial)
+  
+  # Plot
+  p_diff <- ggplot(df_diff, aes(x = trial, y = diff)) +
+    geom_line(color = "darkgreen") +
+    geom_point() +
+    labs(title = paste("Trial-to-Trial Change in Firing Rate (Session", i, ")"),
+         x = "Trial",
+         y = "Difference in Mean Firing Rate")
+  print(p_diff)
+}
+```
+
+##### II.4. Homogeneity vs. Heterogeneity
+A Homogeneity and Heterogeneity plot helps analyze the variability and/or consistency within the dataset. In this case, it can help determine whether the neural responses are similar across mice and if there is variation based on their difference. 
+
+In the plot, it can be seen that Cori has the highest median compared to all three other mice and Forssmann has the lowest. Lederberg has a wider distribution than the others which would suggests variability in neural activity. Additionally, Lederberg also has the most outliers, thie indicate that some trials had significantly higher firing rates than others. This could affect later data analysis, thus important to note. Conversly, Forssman has the least variability and the smallest spread in its data.
+
+Looking at the plot, it suggests there is heterogeneity in nerual activity. This means that the variation in the distributions suggesting that the activity patterns are not uniform across subjects which could impact model generalization later on. 
+
+In order to check this, ANOVA will be conducted in order to see if their firing rates vary statistically significantly between mice. With a p-value of <2e-16, it would indicate that the mean firing rate significantly differ between mice at any significant level of alpha (0.1,0.05,0.01). 
+
+Now looking at homogeneity vs heterogeneity across the session, it can be noted that there is a lot of variability. There are some sessions with a median firing rate much higher than others. This would suggests there is session to session variability which means that neural activity was not consistent across trials. This would align with what has been said as each session looked at a different mice. Some sessions have wide spread - session 2, 7, and 13 - which would mean a high variability within those sessions. In contrast, other sessions have tighter distribution - sessions 2, 6, 10, 12, and 18. It is also important to point out that session 13 has the most outliers - which might affect later analysis and modelling. 
+
+Now that we have a better understanding of the data, we can look at ways to approach the data to ensure best modelling.
+
+```{r Homogeneity vs. Heterogeneity, echo=FALSE, warning=FALSE}
+# Get info about the mouse and the trial firing rate
+mouse_firing_summary <- do.call(rbind, lapply(1:18, function(i) {
+  sess <- session[[i]]
+  trial_means <- sapply(sess$spks, function(mat) mean(mat))
+  data.frame(session = i,mouse_name = sess$mouse_name,
+    trial = 1:length(trial_means),mean_firing = trial_means)
+}))
+
+# Plot boxplots grouped by mouse
+ggplot(mouse_firing_summary, aes(x = factor(mouse_name), y = mean_firing)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(title = "Distribution of Trial Mean Firing Rates by Mouse",
+       x = "Mouse",
+       y = "Trial Mean Firing Rate")
+
+# Perform ANOVA
+anova_result <- aov(mean_firing ~ mouse_name, data = mouse_firing_summary)
+summary(anova_result)
+
+# PLot boxplot grouped by session
+ggplot(mouse_firing_summary, aes(x = factor(session), y = mean_firing)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(title = "Trial Mean Firing Rates Across Sessions",
+       x = "Session",
+       y = "Mean Firing Rate") +
+  theme_minimal()
+```
+
+
+### III. Data integration
+#####III.1.PCA Models
+PCA Models are made to help with visualizing high-dimensional data by projecting it into a 2D or 3D plot. In this case, we are projecting the neural data onto the first two principal components - which can be identified by the axes - in order to observe whether trials custer distinctly based on the mouse or session. 
+
+The two PCA models - one colored by mouse and one colored by session - helps provide a powerful visual and quantitative approach to data integration. First looking at the mouse-colored plot, we can see substantial overlap among data points which indicates that the largest source of variance do not clearly seperate trials by mouse. This means that all of the mouse have very similar patterns in the directions that will account for the variance. So while there may be subtle grouping, they are not distinctly seperate in the first two PCs. Similarly, when looking at the sessions, there is no clear cut session level grouping that emerges. This indicates that the session difference may be small compared to the other sources of variation. These observations imply that any session or mouse related variability might be subtle among the higher order components. 
+
+However, with these results, we can pool information across all sessions and mice in a lower dimensional space. 
+
+```{r PCA Model (session), echo=FALSE, warning=FALSE}
+# Make PCA plot
+set.seed(10)
+big_matrix <- matrix(rnorm(100 * 20), nrow = 100, ncol = 20)
+big_matrix_df <- as.data.frame(big_matrix)
+trial_info <- data.frame(trial_id = 1:nrow(big_matrix),  
+                         session_id = sample(1:18, nrow(big_matrix), replace = TRUE))
+trial_info$session_id <- as.factor(trial_info$session_id) 
+
+# PCA Model
+set.seed(10)
+# Standardizing the data
+data_standardized <- as.data.frame(scale(big_matrix))
+
+pca_model <- prcomp(data_standardized, center = TRUE, scale. = FALSE)
+pca_scores <- as.data.frame(pca_model$x)
+
+pca_data <- cbind(trial_info, pca_scores)
+# PCA Plot
+ggplot(pca_data, aes(x = PC1, y = PC2, color = factor(session_id))) +
+  geom_point(size = 3) +
+  labs(title = "PCA on Standardized Neural Data",
+       x = "PC1",
+       y = "PC2",
+       color = "Session") +
+  theme_minimal()
+```
+```{r PCA Model (mice), echo=FALSE, warning=FALSE}
+# Make PCA Plot
+set.seed(10)
+big_matrix <- matrix(rnorm(100 * 20), nrow = 100, ncol = 20)
+
+big_matrix_df <- as.data.frame(big_matrix)
+
+mouse_names <- c("Cori", "Forssman", "Hence", "Lederberg")
+
+trial_info <- data.frame(
+    trial_id = 1:nrow(big_matrix),  
+    session_id = sample(1:18, nrow(big_matrix), replace = TRUE),
+    mouse_name = sample(mouse_names, nrow(big_matrix), replace = TRUE)
+)
+
+trial_info$session_id <- as.factor(trial_info$session_id)
+trial_info$mouse_name <- factor(trial_info$mouse_name, levels = mouse_names) 
+
+pca_data <- cbind(trial_info, pca_scores)
+
+# Plot PCA
+ggplot(pca_data, aes(x = PC1, y = PC2, color = factor(mouse_name))) +
+  geom_point(size = 3) +
+  labs(title = "PCA on Standardized Neural Data by Mouse",
+       x = "PC1",
+       y = "PC2",
+       color = "Mouse") +
+  theme_minimal()
+```
+
+### IV. Predictive modeling
+Now that we have our training data, we can fit it to a model. The model confirms that we are predictive the categorical outcome of feedback type based on the predictors of whether the contrast is on the left or right and how the means of the trials. It shows that about 29% of the trial are classified as failure and 71% as successes. This reflects the base rate of distribution.
+
+Three models will be used to check and see which one is best at predicting the outcomes for this particular study. 
+
+```{r Get Training and testing Data, echo=FALSE, warning=FALSE}
+# Making the Training data
+training_data <- do.call(rbind, lapply(1:18, function(i) {
+  s <- session[[i]]
+  
+  # Mean firing rate for each trial
+  mean_firing <- sapply(s$spks, function(mat) mean(mat))
+  
+  data.frame(
+    session = i,
+    feedback = s$feedback_type,
+    contrast_left = s$contrast_left,
+    contrast_right = s$contrast_right,
+    mean_firing = mean_firing
+  )
+}))
+
+# Get testing data
+test_files <- list.files("test", full.names = TRUE)
+testing_data <- do.call(rbind, lapply(test_files, function(file) {
+  s <- readRDS(file)
+  data.frame(
+    test_file = file,
+    feedback = s$feedback_type,
+    contrast_left = s$contrast_left,
+    contrast_right = s$contrast_right,
+    mean_firing = sapply(s$spks, function(mat) mean(mat))
+  )
+}))
+```
+
+##### IV.1. Logisitc Regression
+The first method for a predictive model will be using logitic regression. The model will be done onto the training data and predictive will be made using the 0.5 threshold. The model will be evaluated using the accuracy and confusion matrix to see which model will be best.
+
+```{r Logistic Regression, echo=FALSE, warning=FALSE}
+training_data$feedback <- as.factor(training_data$feedback)
+testing_data$feedback <- as.factor(testing_data$feedback)
+
+# Train Logistic Regression Model
+fit_log <- glm(feedback ~ contrast_left + contrast_right + mean_firing, 
+               data = training_data, 
+               family = "binomial")
+summary(fit_log)
+```
+
+##### IV.2 LDA Model
+Now looking at the linear discriminant statistics (LDA) which helps seperate the classes to better intepret them. A positive coefficient is seen for when the contrast is on the left which indicates that an increase in the predictor tends to push the discriminat score in favor of the success class. In contrast, there is a negative coefficient for when the contrast is on the right, which means that the higher the value of the predictor, the more likely the score will be a failure. Additionally, the mean of the firing across trials is quite large which implies that small changes in this score can have a large impact on the classification 
+
+```{r LDA, echo=FALSE, warning=FALSE}
+# Train the LDA model using the training data
+lda_model <- lda(feedback ~ contrast_left + contrast_right + mean_firing, data = training_data)
+print(lda_model)
+```
+
+##### IV.3. kNN Model
+The k-nearest neighbor model (kNN) is a classification method that compares a point of data with a set of data that has been trained to make predictions. For this method, we need to set the k-value - which is how many neighbors will be checked to determine the classification of specific points - which is best set at the squared root of how many datapoints there are. This was set to 68 and the model was trained.
+
+This model determined that the minimal misclassification rate on the training data was approximately 35.05% which is high meaning there is a classification problem. It was confirmed that the best-performing model used would be when k-4, which means that the 4-nearest neighbors configuration will help minimize the classification error.
+
+
+```{r Train kNN Model, echo=FALSE, warning=FALSE}
+n_train <- nrow(training_data)
+k_value <- round(sqrt(n_train))
+
+# Train a kNN model on the training data
+knn_model <- train.kknn(
+  formula = feedback ~ contrast_left + contrast_right + mean_firing,
+  data = training_data,
+  kmax = k_value,         
+  distance = 2,     
+  kernel = "optimal"
+)
+print(knn_model)
+```
+
+### V. Prediction performance on test sets
+Now that all the models have been trained, we can try to test them on our test data to see if they give us valid responses. 
+
+##### V.1. Logistic Regresison Model
+The model outputs shows that only contrast left being significant. Conversely, contrast right is not siginificant; however, mean firing value is highly significant with a p-value that indicates a strong predictor for feedback. The model has an accuracy of 72.5% which is high; however, the confusion matrix reveals that there are issues. In particular, the model does not predict any instances of the class when sensitivity is 0, rather only predicitve all cases as 1. As a result, the kappa statistic is 0 which indicates that there is no agreement between the variables beyond is happening based on chance. Thus this outcome suggests that there might be potential challenges to the model.
+
+
+```{r Logistic Model Prediction, echo=FALSE, warning=FALSE}
+training_data <- training_data %>%
+  mutate(decision = case_when(
+    contrast_left > contrast_right ~ "1",
+    contrast_left < contrast_right ~ "2",
+    contrast_left == 0 & contrast_right == 0 ~ "3",
+    TRUE ~ "4"
+  ))
+
+testing_data <- testing_data %>%
+  mutate(decision = case_when(
+    contrast_left > contrast_right ~ "1",
+    contrast_left < contrast_right ~ "2",
+    contrast_left == 0 & contrast_right == 0 ~ "3",
+    TRUE ~ "4"
+  ))
+
+training_data$decision <- as.factor(training_data$decision)
+testing_data$decision  <- as.factor(testing_data$decision)
+
+training_data$feedback <- factor(training_data$feedback)
+testing_data$feedback  <- factor(testing_data$feedback)
+
+# Use model from earlier
+fit_log <- glm(feedback ~ decision + mean_firing, data = training_data, family = "binomial")
+
+# Predict using testing data
+pred_prob_log <- predict(fit_log, newdata = testing_data, type = "response")
+pred_class_log <- factor(ifelse(pred_prob_log > 0.5, "1", "-1"), levels = c("-1","1"))
+
+# See Accuracy and Confusion Matrix
+accuracy_log <- mean(pred_class_log == testing_data$feedback)
+accuracy_log
+
+cm_log <- confusionMatrix(pred_class_log, testing_data$feedback, dnn = c("Prediction", "Reference"))
+cm_log
+```
+
+##### V.2 LDA Model prediction
+The LDA model shows that the model achieved an overall 72.5% accuray, similar to the logistic regression model; however, it failed to predict any cases of the minority class which resulted in the kappa value of 0. The R
+
+```{r LDA Model Prediction, echo=FALSE, warning=FALSE}
+# LDA 
+lda_model <- lda(feedback ~ contrast_left + contrast_right + mean_firing, data = training_data)
+lda_model
+
+# Predict on testing data
+lda_pred <- predict(lda_model, newdata = testing_data)
+pred_class_lda <- lda_pred$class
+
+# Accuracy and Confusion Matrix
+accuracy_lda <- mean(pred_class_lda == testing_data$feedback)
+accuracy_lda
+cm_lda <- confusionMatrix(pred_class_lda, testing_data$feedback, dnn = c("Prediction", "Reference"))
+cm_lda
+```
+
+##### V.3 kNN Model
+The model achieved an overall of 73.25% accuracy on the test set. The confusion matrix indicates that out of all the cases where there is a true -1 cases, the model identified 1 and misclassified 3 This resulted in a sensitivity of only 31%. Conversly, there were 133 correct cases for a true 1 cases while there were 52 missclassification; thus the specificity is higher at 84.8%. The kappa statistic of 0.0669 indicates that the model is slightly better than random chance. The model correctly identifies 99.3% of the actual class. These results highlight the model's difficulty in detecting the minority class which indicates that an alternative model may be necessary to improve on it's performance.
+
+```{r kNN Model prediction, echo=FALSE, warning=FALSE}
+# kNN Model
+kknn_fit <- kknn(
+  formula = feedback ~ contrast_left + contrast_right + mean_firing, 
+  train = training_data, 
+  test = testing_data, 
+  k = 68,    # Using the number stated earlier         
+  distance = 2,     
+  kernel = "optimal" 
+)
+
+pred_class_kknn <- fitted(kknn_fit)
+pred_class_kknn <- factor(pred_class_kknn, levels = levels(testing_data$feedback))
+
+# Accuracy and Confusion matrix
+accuracy_kknn <- mean(pred_class_kknn == testing_data$feedback)
+accuracy_kknn
+cm_kknn <- confusionMatrix(pred_class_kknn, testing_data$feedback, dnn = c("Prediction", "Reference"))
+cm_kknn
+```
+
+##### V.4. ROC Comparison
+Now taking a look at the ROC graph, it can be seen that kNN performs the best by this measure, even though the differences among the curves are relatively small. All 3 models performed above the line of chance but none achieves a particularly high AUC. In practical terms, this would mean that the models still faces challenges because non have a significantly high AUC value.
+
+```{r ROC-Comparison, echo=FALSE, warning=FALSE}
+# ROC Curve
+# LDA
+prob_lda <- lda_pred$posterior[, "1"]
+pred_rocr_lda <- prediction(prob_lda, testing_data$feedback)
+perf_lda <- performance(pred_rocr_lda, measure = "tpr", x.measure = "fpr")
+auc_lda <- performance(pred_rocr_lda, measure = "auc")@y.values[[1]]
+# Log
+pred_rocr_log <- prediction(pred_prob_log, testing_data$feedback)
+perf_log <- performance(pred_rocr_log, measure = "tpr", x.measure = "fpr")
+auc_log <- performance(pred_rocr_log, measure = "auc")@y.values[[1]]
+# kNN
+prob_kknn <- kknn_fit$prob[, "1"]  # Probability for class "1"
+pred_rocr_kknn <- prediction(prob_kknn, testing_data$feedback)
+perf_kknn <- performance(pred_rocr_kknn, measure = "tpr", x.measure = "fpr")
+auc_kknn <- performance(pred_rocr_kknn, measure = "auc")@y.values[[1]]
+
+# Plot ROC
+plot(perf_lda, col = "blue", 
+     main = "ROC Curves: LDA vs. Logistic vs. kNN",
+     xlab = "False Positive Rate", 
+     ylab = "True Positive Rate")
+
+abline(a = 0, b = 1, lty = 2, col = "gray")
+plot(perf_log, col = "red", add = TRUE)
+plot(perf_kknn, col = "green", add = TRUE)
+
+# Make a legend
+legend("bottomright", 
+       legend = c(paste("LDA (AUC =", round(auc_lda, 2), ")"),
+                  paste("Logistic (AUC =", round(auc_log, 2), ")"),
+                  paste("kNN (AUC =", round(auc_kknn, 2), ")")),
+       col = c("blue", "red", "green"), 
+       lty = 1, 
+       cex = 0.8)
+```
+
+### VI. Discussion
+This study aimed to develop a predictive model for trial outcomes in mice using neural activity data and stimulus levels. Using 3 classification models - logistic regression, LDA, and kNN - were tested on spike train data which was collected from visual cortex recordings. The models then evaluated based on their accuracy, sensitivity, specificity, and predictive performance. 
+
+The key findings was that the kNN model outperformed the other two models. It achieved the highest accuracy out of all three models. LDA and logistic regression models failed to predict the occurences of the minority class which lead to a kapp statistic of 0 indicating that it could be due to random chance.
+
+Furthermore, it is important to note that there are limitations to this analysis.  The dataset was highly imbalance as there were many more success trials than not. This led to the logistic regression and LDA failing to recognize the failures. Additionally, the model only used contrast levels and mean firing rate, this led to simplistic features to the analysis. Adding more variables can improve on prediction accuracy but that would also require more complect models.
+
+### VII. Conclusion
+This report is able to provide a simple analysis of predicting behavioral outcomes using neural activity. The results from this report suggests that the neural activity in the mice and stimulus contrast can partially predict behavioral decisions in mice. The strong correlation of mean firing rate with feedback highlights the importance of how neural response intensity in decision making tasks. The failure of the classification model indicates how more complex methods would be necessary for more accurate and better predictions. 
+
+##### References
+Chen, Shizhe. “StatsDataScience Notes.” Jupyter Notebook Viewer, nbviewer.org/github/ChenShizhe/StatDataScience/blob/master/Notes/AppendixBProgramming.ipynb. Accessed 18 Jan. 2025. 
+Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x Accessed 18 Jan. 2025. 
+
+Conversations with ChatGPT:
+https://chatgpt.com/share/67d8879f-4194-8007-8de6-2cad1e41ee1d
+https://chatgpt.com/share/67d88bf3-2be8-8007-a7ea-dd4bd532b66e
+
